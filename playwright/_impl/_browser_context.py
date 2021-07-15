@@ -22,7 +22,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Unio
 from playwright._impl._api_structures import Cookie, Geolocation, StorageState
 from playwright._impl._api_types import Error
 from playwright._impl._cdp_session import CDPSession
-from playwright._impl._connection import ChannelOwner, from_channel
+from playwright._impl._connection import (
+    ChannelOwner,
+    from_channel,
+    from_nullable_channel,
+)
 from playwright._impl._event_context_manager import EventContextManagerImpl
 from playwright._impl._helper import (
     RouteHandler,
@@ -30,11 +34,14 @@ from playwright._impl._helper import (
     TimeoutSettings,
     URLMatch,
     URLMatcher,
+    async_readfile,
+    async_writefile,
     is_safe_close_error,
     locals_to_params,
 )
-from playwright._impl._network import Request, Route, serialize_headers
+from playwright._impl._network import Request, Response, Route, serialize_headers
 from playwright._impl._page import BindingCall, Page, Worker
+from playwright._impl._tracing import Tracing
 from playwright._impl._wait_helper import WaitHelper
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -48,6 +55,10 @@ class BrowserContext(ChannelOwner):
         Close="close",
         Page="page",
         ServiceWorker="serviceworker",
+        Request="request",
+        Response="response",
+        RequestFailed="requestfailed",
+        RequestFinished="requestfinished",
     )
 
     def __init__(
@@ -60,11 +71,10 @@ class BrowserContext(ChannelOwner):
         self._timeout_settings = TimeoutSettings(None)
         self._browser: Optional["Browser"] = None
         self._owner_page: Optional[Page] = None
-        self._is_closed_or_closing = False
         self._options: Dict[str, Any] = {}
         self._background_pages: Set[Page] = set()
         self._service_workers: Set[Worker] = set()
-
+        self._tracing = Tracing(self)
         self._channel.on(
             "bindingCall",
             lambda params: self._on_binding(from_channel(params["binding"])),
@@ -89,12 +99,44 @@ class BrowserContext(ChannelOwner):
             "serviceWorker",
             lambda params: self._on_service_worker(from_channel(params["worker"])),
         )
+        self._channel.on(
+            "request",
+            lambda params: self._on_request(
+                from_channel(params["request"]),
+                from_nullable_channel(params.get("page")),
+            ),
+        )
+        self._channel.on(
+            "response",
+            lambda params: self._on_response(
+                from_channel(params["response"]),
+                from_nullable_channel(params.get("page")),
+            ),
+        )
+        self._channel.on(
+            "requestFailed",
+            lambda params: self._on_request_failed(
+                from_channel(params["request"]),
+                params["responseEndTiming"],
+                params["failureText"],
+                from_nullable_channel(params.get("page")),
+            ),
+        )
+        self._channel.on(
+            "requestFinished",
+            lambda params: self._on_request_finished(
+                from_channel(params["request"]),
+                params["responseEndTiming"],
+                from_nullable_channel(params.get("page")),
+            ),
+        )
+        self._closed_future: asyncio.Future = asyncio.Future()
+        self.once(self.Events.Close, lambda: self._closed_future.set_result(True))
 
     def __repr__(self) -> str:
         return f"<BrowserContext browser={self.browser}>"
 
     def _on_page(self, page: Page) -> None:
-        page._set_browser_context(self)
         self._pages.append(page)
         self.emit(BrowserContext.Events.Page, page)
         if page._opener and not page._opener.is_closed():
@@ -174,8 +216,7 @@ class BrowserContext(ChannelOwner):
         self, script: str = None, path: Union[str, Path] = None
     ) -> None:
         if path:
-            with open(path, "r") as file:
-                script = file.read()
+            script = (await async_readfile(path)).decode()
         if not isinstance(script, str):
             raise Error("Either path or script parameter must be specified")
         await self._channel.send("addInitScript", dict(source=script))
@@ -199,7 +240,9 @@ class BrowserContext(ChannelOwner):
         await self.expose_binding(name, lambda source, *args: callback(*args))
 
     async def route(self, url: URLMatch, handler: RouteHandler) -> None:
-        self._routes.append(RouteHandlerEntry(URLMatcher(url), handler))
+        self._routes.insert(
+            0, RouteHandlerEntry(URLMatcher(self._options.get("baseURL"), url), handler)
+        )
         if len(self._routes) == 1:
             await self._channel.send(
                 "setNetworkInterceptionEnabled", dict(enabled=True)
@@ -239,18 +282,15 @@ class BrowserContext(ChannelOwner):
         return EventContextManagerImpl(wait_helper.result())
 
     def _on_close(self) -> None:
-        self._is_closed_or_closing = True
         if self._browser:
             self._browser._contexts.remove(self)
 
         self.emit(BrowserContext.Events.Close)
 
     async def close(self) -> None:
-        if self._is_closed_or_closing:
-            return
-        self._is_closed_or_closing = True
         try:
             await self._channel.send("close")
+            await self._closed_future
         except Exception as e:
             if not is_safe_close_error(e):
                 raise e
@@ -261,8 +301,7 @@ class BrowserContext(ChannelOwner):
     async def storage_state(self, path: Union[str, Path] = None) -> StorageState:
         result = await self._channel.send_return_as_dict("storageState")
         if path:
-            with open(path, "w") as f:
-                json.dump(result, f)
+            await async_writefile(path, json.dumps(result))
         return result
 
     async def wait_for_event(
@@ -288,6 +327,39 @@ class BrowserContext(ChannelOwner):
         self._service_workers.add(worker)
         self.emit(BrowserContext.Events.ServiceWorker, worker)
 
+    def _on_request_failed(
+        self,
+        request: Request,
+        response_end_timing: float,
+        failure_text: Optional[str],
+        page: Optional[Page],
+    ) -> None:
+        request._failure_text = failure_text
+        if request._timing:
+            request._timing["responseEnd"] = response_end_timing
+        self.emit(BrowserContext.Events.RequestFailed, request)
+        if page:
+            page.emit(Page.Events.RequestFailed, request)
+
+    def _on_request_finished(
+        self, request: Request, response_end_timing: float, page: Optional[Page]
+    ) -> None:
+        if request._timing:
+            request._timing["responseEnd"] = response_end_timing
+        self.emit(BrowserContext.Events.RequestFinished, request)
+        if page:
+            page.emit(Page.Events.RequestFinished, request)
+
+    def _on_request(self, request: Request, page: Optional[Page]) -> None:
+        self.emit(BrowserContext.Events.Request, request)
+        if page:
+            page.emit(Page.Events.Request, request)
+
+    def _on_response(self, response: Response, page: Optional[Page]) -> None:
+        self.emit(BrowserContext.Events.Response, response)
+        if page:
+            page.emit(Page.Events.Response, response)
+
     @property
     def background_pages(self) -> List[Page]:
         return list(self._background_pages)
@@ -300,3 +372,7 @@ class BrowserContext(ChannelOwner):
         return from_channel(
             await self._channel.send("newCDPSession", {"page": page._channel})
         )
+
+    @property
+    def tracing(self) -> Tracing:
+        return self._tracing

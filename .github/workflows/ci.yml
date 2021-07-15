@@ -145,21 +145,41 @@ jobs:
     - name: Install ffmpeg
       run: python -m playwright install ffmpeg
     - name: Common Tests
-      run: pytest -vv tests/common --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
+      run: pytest tests/common --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
     - name: Test Sync API
       if: matrix.os != 'ubuntu-latest'
-      run: pytest -vv tests/sync --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
+      run: pytest tests/sync --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
     - name: Test Sync API
       if: matrix.os == 'ubuntu-latest'
-      run: xvfb-run pytest -vv tests/sync --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
+      run: xvfb-run pytest tests/sync --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
     - name: Test Async API
       if: matrix.os != 'ubuntu-latest'
-      run: pytest -vv tests/async --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
+      run: pytest tests/async --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
     - name: Test Async API
       if: matrix.os == 'ubuntu-latest'
-      run: xvfb-run pytest -vv tests/async --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
+      run: xvfb-run pytest tests/async --browser=chromium --browser-channel=${{ matrix.browser-channel }} --timeout 90
     - uses: actions/upload-artifact@v2
       if: failure()
       with:
         name: ${{ matrix.browser-channel }}-${{ matrix.os }}
         path: pw-log.txt
+  build-conda:
+    name: Conda Build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, macos-10.15, windows-2019]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Get conda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          python-version: 3.9
+          channels: conda-forge
+      - name: Prepare
+        run: conda install conda-build conda-verify
+      - name: Build
+        run: conda build .

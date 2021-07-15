@@ -26,6 +26,7 @@ class Download:
     def __init__(
         self, page: "Page", url: str, suggested_filename: str, artifact: Artifact
     ) -> None:
+        self._page = page
         self._loop = page._loop
         self._dispatcher_fiber = page._dispatcher_fiber
         self._url = url
@@ -34,6 +35,10 @@ class Download:
 
     def __repr__(self) -> str:
         return f"<Download url={self.url!r} suggested_filename={self.suggested_filename!r}>"
+
+    @property
+    def page(self) -> "Page":
+        return self._page
 
     @property
     def url(self) -> str:
@@ -54,3 +59,6 @@ class Download:
 
     async def save_as(self, path: Union[str, Path]) -> None:
         await self._artifact.save_as(path)
+
+    async def cancel(self) -> None:
+        return await self._artifact.cancel()

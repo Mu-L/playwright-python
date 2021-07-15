@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import asyncio
 import fnmatch
 import math
 import os
@@ -32,6 +32,7 @@ from typing import (
     Union,
     cast,
 )
+from urllib.parse import urljoin
 
 from playwright._impl._api_types import Error, TimeoutError
 
@@ -50,20 +51,10 @@ URLMatchResponse = Union[str, Pattern, Callable[["Response"], bool]]
 RouteHandler = Union[Callable[["Route"], Any], Callable[["Route", "Request"], Any]]
 
 ColorScheme = Literal["dark", "light", "no-preference"]
+ReducedMotion = Literal["no-preference", "reduce"]
 DocumentLoadState = Literal["domcontentloaded", "load", "networkidle"]
 KeyboardModifier = Literal["Alt", "Control", "Meta", "Shift"]
 MouseButton = Literal["left", "middle", "right"]
-
-BrowserChannel = Literal[
-    "chrome",
-    "chrome-beta",
-    "chrome-canary",
-    "chrome-dev",
-    "msedge",
-    "msedge-beta",
-    "msedge-canary",
-    "msedge-dev",
-]
 
 
 class ErrorPayload(TypedDict, total=False):
@@ -115,10 +106,12 @@ Env = Dict[str, Union[str, float, bool]]
 
 
 class URLMatcher:
-    def __init__(self, match: URLMatch) -> None:
+    def __init__(self, base_url: Union[str, None], match: URLMatch) -> None:
         self._callback: Optional[Callable[[str], bool]] = None
         self._regex_obj: Optional[Pattern] = None
         if isinstance(match, str):
+            if base_url and not match.startswith("*"):
+                match = urljoin(base_url, match)
             regex = fnmatch.translate(match)
             self._regex_obj = re.compile(regex)
         elif isinstance(match, Pattern):
@@ -170,9 +163,10 @@ def parse_error(error: ErrorPayload) -> Error:
     base_error_class = Error
     if error.get("name") == "TimeoutError":
         base_error_class = TimeoutError
-    return base_error_class(
-        cast(str, patch_error_message(error.get("message"))), error["stack"]
-    )
+    exc = base_error_class(cast(str, patch_error_message(error.get("message"))))
+    exc.name = error["name"]
+    exc.stack = error["stack"]
+    return exc
 
 
 def patch_error_message(message: Optional[str]) -> Optional[str]:
@@ -240,3 +234,21 @@ def make_dirs_for_file(path: Union[Path, str]) -> None:
     if not os.path.isabs(path):
         path = Path.cwd() / path
     os.makedirs(os.path.dirname(path), exist_ok=True)
+
+
+async def async_writefile(file: Union[str, Path], data: Union[str, bytes]) -> None:
+    def inner() -> None:
+        with open(file, "w" if isinstance(data, str) else "wb") as fh:
+            fh.write(data)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, inner)
+
+
+async def async_readfile(file: Union[str, Path]) -> bytes:
+    def inner() -> bytes:
+        with open(file, "rb") as fh:
+            return fh.read()
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, inner)

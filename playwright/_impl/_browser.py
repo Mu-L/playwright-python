@@ -28,7 +28,13 @@ from playwright._impl._api_structures import (
 from playwright._impl._browser_context import BrowserContext
 from playwright._impl._cdp_session import CDPSession
 from playwright._impl._connection import ChannelOwner, from_channel
-from playwright._impl._helper import ColorScheme, is_safe_close_error, locals_to_params
+from playwright._impl._helper import (
+    ColorScheme,
+    ReducedMotion,
+    async_readfile,
+    is_safe_close_error,
+    locals_to_params,
+)
 from playwright._impl._network import serialize_headers
 from playwright._impl._page import Page
 
@@ -50,6 +56,7 @@ class Browser(ChannelOwner):
         self._is_connected = True
         self._is_closed_or_closing = False
         self._is_remote = False
+        self._is_connected_over_websocket = False
 
         self._contexts: List[BrowserContext] = []
         self._channel.on("close", lambda _: self._on_close())
@@ -59,7 +66,7 @@ class Browser(ChannelOwner):
 
     def _on_close(self) -> None:
         self._is_connected = False
-        self.emit(Browser.Events.Disconnected)
+        self.emit(Browser.Events.Disconnected, self)
         self._is_closed_or_closing = True
 
     @property
@@ -89,6 +96,7 @@ class Browser(ChannelOwner):
         isMobile: bool = None,
         hasTouch: bool = None,
         colorScheme: ColorScheme = None,
+        reducedMotion: ReducedMotion = None,
         acceptDownloads: bool = None,
         defaultBrowserType: str = None,
         proxy: ProxySettings = None,
@@ -97,9 +105,10 @@ class Browser(ChannelOwner):
         recordVideoDir: Union[Path, str] = None,
         recordVideoSize: ViewportSize = None,
         storageState: Union[StorageState, str, Path] = None,
+        baseURL: str = None,
     ) -> BrowserContext:
         params = locals_to_params(locals())
-        normalize_context_params(self._connection._is_sync, params)
+        await normalize_context_params(self._connection._is_sync, params)
 
         channel = await self._channel.send("newContext", params)
         context = from_channel(channel)
@@ -128,6 +137,7 @@ class Browser(ChannelOwner):
         isMobile: bool = None,
         hasTouch: bool = None,
         colorScheme: ColorScheme = None,
+        reducedMotion: ReducedMotion = None,
         acceptDownloads: bool = None,
         defaultBrowserType: str = None,
         proxy: ProxySettings = None,
@@ -136,6 +146,7 @@ class Browser(ChannelOwner):
         recordVideoDir: Union[Path, str] = None,
         recordVideoSize: ViewportSize = None,
         storageState: Union[StorageState, str, Path] = None,
+        baseURL: str = None,
     ) -> Page:
         params = locals_to_params(locals())
         context = await self.new_context(**params)
@@ -153,6 +164,8 @@ class Browser(ChannelOwner):
         except Exception as e:
             if not is_safe_close_error(e):
                 raise e
+        if self._is_connected_over_websocket:
+            await self._connection.stop_async()
 
     @property
     def version(self) -> str:
@@ -180,7 +193,7 @@ class Browser(ChannelOwner):
         return base64.b64decode(encoded_binary)
 
 
-def normalize_context_params(is_sync: bool, params: Dict) -> None:
+async def normalize_context_params(is_sync: bool, params: Dict) -> None:
     params["sdkLanguage"] = "python" if is_sync else "python-async"
     if params.get("noViewport"):
         del params["noViewport"]
@@ -204,5 +217,6 @@ def normalize_context_params(is_sync: bool, params: Dict) -> None:
     if "storageState" in params:
         storageState = params["storageState"]
         if not isinstance(storageState, dict):
-            with open(storageState, "r") as f:
-                params["storageState"] = json.load(f)
+            params["storageState"] = json.loads(
+                (await async_readfile(storageState)).decode()
+            )

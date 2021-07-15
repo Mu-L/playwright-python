@@ -18,6 +18,7 @@ from typing import Any
 from playwright._impl._connection import Connection
 from playwright._impl._driver import compute_driver_executable
 from playwright._impl._object_factory import create_remote_object
+from playwright._impl._transport import PipeTransport
 from playwright.async_api._generated import Playwright as AsyncPlaywright
 
 
@@ -26,15 +27,24 @@ class PlaywrightContextManager:
         self._connection: Connection
 
     async def __aenter__(self) -> AsyncPlaywright:
-        self._connection = Connection(
-            None, create_remote_object, compute_driver_executable()
-        )
         loop = asyncio.get_running_loop()
+        self._connection = Connection(
+            None,
+            create_remote_object,
+            PipeTransport(loop, compute_driver_executable()),
+        )
         self._connection._loop = loop
         loop.create_task(self._connection.run())
-        playwright = AsyncPlaywright(
-            await self._connection.wait_for_object_with_known_name("Playwright")
+        playwright_future = loop.create_task(
+            self._connection.wait_for_object_with_known_name("Playwright")
         )
+        done, pending = await asyncio.wait(
+            {self._connection._transport.on_error_future, playwright_future},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not playwright_future.done():
+            playwright_future.cancel()
+        playwright = AsyncPlaywright(next(iter(done)).result())
         playwright.stop = self.__aexit__  # type: ignore
         return playwright
 

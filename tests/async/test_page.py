@@ -18,7 +18,8 @@ import re
 
 import pytest
 
-from playwright.async_api import Error, TimeoutError
+from playwright.async_api import Error, Page, TimeoutError
+from tests.server import Server
 
 
 async def test_close_should_reject_all_promises(context):
@@ -58,8 +59,8 @@ async def test_close_should_run_beforeunload_if_asked_for(
         assert dialog.message == "Leave?"
     else:
         assert (
-            dialog.message
-            == "This page is asking you to confirm that you want to leave — information you’ve entered may not be saved."
+            "This page is asking you to confirm that you want to leave"
+            in dialog.message
         )
     async with page.expect_event("close"):
         await dialog.accept()
@@ -126,9 +127,6 @@ async def test_async_stacks_should_work(page, server):
     with pytest.raises(Error) as exc_info:
         await page.goto(server.EMPTY_PAGE)
     assert __file__ in exc_info.value.stack
-
-
-# TODO: bring in page.crash events
 
 
 async def test_opener_should_provide_access_to_the_opener_page(page):
@@ -394,16 +392,41 @@ async def test_expose_bindinghandle_should_work(page, server):
     assert result == 17
 
 
-async def test_page_error_should_fire(page, server, is_webkit):
+async def test_page_error_should_fire(page, server, browser_name):
+    url = server.PREFIX + "/error.html"
     async with page.expect_event("pageerror") as error_info:
-        await page.goto(server.PREFIX + "/error.html")
+        await page.goto(url)
     error = await error_info.value
+    assert error.name == "Error"
     assert error.message == "Fancy error!"
-    stack = await page.evaluate("window.e.stack")
     # Note that WebKit reports the stack of the 'throw' statement instead of the Error constructor call.
-    if is_webkit:
-        stack = stack.replace("14:25", "15:19")
-    assert error.stack == stack
+    if browser_name == "chromium":
+        assert (
+            error.stack
+            == """Error: Fancy error!
+    at c (myscript.js:14:11)
+    at b (myscript.js:10:5)
+    at a (myscript.js:6:5)
+    at myscript.js:3:1"""
+        )
+    if browser_name == "firefox":
+        assert (
+            error.stack
+            == """Error: Fancy error!
+    at c (myscript.js:14:11)
+    at b (myscript.js:10:5)
+    at a (myscript.js:6:5)
+    at  (myscript.js:3:1)"""
+        )
+    if browser_name == "webkit":
+        assert (
+            error.stack
+            == f"""Error: Fancy error!
+    at c ({url}:14:36)
+    at b ({url}:10:6)
+    at a ({url}:6:6)
+    at global code ({url}:3:2)"""
+        )
 
 
 async def test_page_error_should_handle_odd_values(page):
@@ -422,13 +445,26 @@ async def test_page_error_should_handle_object(page, is_chromium):
     assert error.message == "Object" if is_chromium else "[object Object]"
 
 
-@pytest.mark.skip_browser("firefox")
 async def test_page_error_should_handle_window(page, is_chromium):
-    # Firefox just does not report this error.
     async with page.expect_event("pageerror") as error_info:
         await page.evaluate("() => setTimeout(() => { throw window; }, 0)")
     error = await error_info.value
     assert error.message == "Window" if is_chromium else "[object Window]"
+
+
+async def test_page_error_should_pass_error_name_property(page):
+    async with page.expect_event("pageerror") as error_info:
+        await page.evaluate(
+            """() => setTimeout(() => {
+            const error = new Error("my-message");
+            error.name = "my-name";
+            throw error;
+        }, 0)
+        """
+        )
+    error = await error_info.value
+    assert error.message == "my-message"
+    assert error.name == "my-name"
 
 
 expected_output = "<html><head></head><body><div>hello</div></body></html>"
@@ -752,7 +788,6 @@ async def test_select_option_should_select_only_first_option(page, server):
     assert await page.evaluate("result.onChange") == ["blue"]
 
 
-@pytest.mark.skip_browser("webkit")  # TODO: investigate
 async def test_select_option_should_not_throw_when_select_causes_navigation(
     page, server
 ):
@@ -1207,3 +1242,31 @@ async def test_frame_press_should_work(page, server):
     frame = page.frame("inner")
     await frame.press("textarea", "a")
     assert await frame.evaluate("document.querySelector('textarea').value") == "a"
+
+
+async def test_should_emulate_reduced_motion(page, server):
+    assert await page.evaluate(
+        "matchMedia('(prefers-reduced-motion: no-preference)').matches"
+    )
+    await page.emulate_media(reduced_motion="reduce")
+    assert await page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")
+    assert not await page.evaluate(
+        "matchMedia('(prefers-reduced-motion: no-preference)').matches"
+    )
+    await page.emulate_media(reduced_motion="no-preference")
+    assert not await page.evaluate(
+        "matchMedia('(prefers-reduced-motion: reduce)').matches"
+    )
+    assert await page.evaluate(
+        "matchMedia('(prefers-reduced-motion: no-preference)').matches"
+    )
+
+
+async def test_input_value(page: Page, server: Server):
+    await page.goto(server.PREFIX + "/input/textarea.html")
+
+    await page.fill("input", "my-text-content")
+    assert await page.input_value("input") == "my-text-content"
+
+    await page.fill("input", "")
+    assert await page.input_value("input") == ""

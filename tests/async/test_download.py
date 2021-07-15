@@ -53,6 +53,7 @@ async def test_should_report_downloads_with_accept_downloads_false(page: Page, s
     async with page.expect_download() as download_info:
         await page.click("a")
     download = await download_info.value
+    assert download.page is page
     assert download.url == f"{server.PREFIX}/downloadWithFilename"
     assert download.suggested_filename == "file.txt"
     assert (
@@ -194,7 +195,7 @@ async def test_should_error_when_saving_after_deletion(tmpdir, browser, server):
     await download.delete()
     with pytest.raises(Error) as exc:
         await download.save_as(user_path)
-    assert "File already deleted. Save before deleting." in exc.value.message
+    assert "Target page, context or browser has been closed" in exc.value.message
     await page.close()
 
 
@@ -287,9 +288,6 @@ async def test_should_report_alt_click_downloads(browser, server):
 
 
 async def test_should_report_new_window_downloads(browser, server):
-    # TODO: - the test fails in headful Chromium as the popup page gets closed along
-    # with the session before download completed event arrives.
-    # - WebKit doesn't close the popup page
     page = await browser.new_page(accept_downloads=True)
     await page.set_content(
         f'<a target=_blank href="{server.PREFIX}/download">download</a>'
@@ -351,3 +349,22 @@ async def test_should_delete_downloads_on_browser_gone(browser_factory, server):
     assert os.path.exists(path1) is False
     assert os.path.exists(path2) is False
     assert os.path.exists(os.path.join(path1, "..")) is False
+
+
+async def test_download_cancel_should_work(browser, server):
+    def handle_download(request):
+        request.setHeader("Content-Type", "application/octet-stream")
+        request.setHeader("Content-Disposition", "attachment")
+        # Chromium requires a large enough payload to trigger the download event soon enough
+        request.write(b"a" * 4096)
+        request.write(b"foo")
+
+    server.set_route("/downloadWithDelay", handle_download)
+    page = await browser.new_page(accept_downloads=True)
+    await page.set_content(f'<a href="{server.PREFIX}/downloadWithDelay">download</a>')
+    async with page.expect_download() as download_info:
+        await page.click("a")
+    download = await download_info.value
+    await download.cancel()
+    assert await download.failure() == "canceled"
+    await page.close()

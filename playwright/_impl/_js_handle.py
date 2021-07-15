@@ -98,7 +98,7 @@ def serialize_value(value: Any, handles: List[JSHandle], depth: int) -> Any:
     if depth > 100:
         raise Error("Maximum argument depth exceeded")
     if value is None:
-        return dict(v="undefined")
+        return dict(v="null")
     if isinstance(value, float):
         if value == float("inf"):
             return dict(v="Infinity")
@@ -122,7 +122,7 @@ def serialize_value(value: Any, handles: List[JSHandle], depth: int) -> Any:
         return dict(a=result)
 
     if isinstance(value, dict):
-        result = []  # type: ignore
+        result = []
         for name in value:
             result.append(
                 {"k": name, "v": serialize_value(value[name], handles, depth + 1)}

@@ -13,12 +13,12 @@
 # limitations under the License.
 
 import base64
-import mimetypes
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Union
 
 from playwright._impl._api_structures import FilePayload
+from playwright._impl._helper import async_readfile
 
 if TYPE_CHECKING:  # pragma: no cover
     from playwright._impl._element_handle import ElementHandle
@@ -58,22 +58,19 @@ class FileChooser:
         await self._element_handle.set_input_files(files, timeout, noWaitAfter)
 
 
-def normalize_file_payloads(
+async def normalize_file_payloads(
     files: Union[str, Path, FilePayload, List[Union[str, Path]], List[FilePayload]]
 ) -> List:
     file_list = files if isinstance(files, list) else [files]
     file_payloads: List = []
     for item in file_list:
-        if isinstance(item, str) or isinstance(item, Path):
-            with open(item, mode="rb") as fd:
-                file_payloads.append(
-                    {
-                        "name": os.path.basename(item),
-                        "mimeType": mimetypes.guess_type(str(Path(item)))[0]
-                        or "application/octet-stream",
-                        "buffer": base64.b64encode(fd.read()).decode(),
-                    }
-                )
+        if isinstance(item, (str, Path)):
+            file_payloads.append(
+                {
+                    "name": os.path.basename(item),
+                    "buffer": base64.b64encode(await async_readfile(item)).decode(),
+                }
+            )
         else:
             file_payloads.append(
                 {

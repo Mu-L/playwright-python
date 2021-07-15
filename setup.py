@@ -20,7 +20,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-import setuptools
+from setuptools import find_packages, setup
 
 try:
     from auditwheel.wheeltools import InWheel
@@ -28,7 +28,7 @@ except ImportError:
     InWheel = None
 from wheel.bdist_wheel import bdist_wheel as BDistWheelCommand
 
-driver_version = "1.11.0-next-1619111599000"
+driver_version = "1.13.0-next-1626254028000"
 
 
 def extractall(zip: zipfile.ZipFile, path: str) -> None:
@@ -120,7 +120,6 @@ class PlaywrightBDistWheelCommand(BDistWheelCommand):
                 with InWheel(
                     in_wheel=whlfile,
                     out_wheel=os.path.join("wheelhouse", os.path.basename(whlfile)),
-                    ret_self=True,
                 ):
                     print("Updating RECORD file of %s" % whlfile)
             shutil.rmtree(self.dist_dir)
@@ -130,7 +129,7 @@ class PlaywrightBDistWheelCommand(BDistWheelCommand):
             print("auditwheel not installed, not updating RECORD file")
 
 
-setuptools.setup(
+setup(
     name="playwright",
     author="Microsoft Corporation",
     author_email="",
@@ -138,10 +137,11 @@ setuptools.setup(
     long_description=Path("README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     url="https://github.com/Microsoft/playwright-python",
-    packages=["playwright"],
+    packages=find_packages(exclude=["tests*"]),
     include_package_data=True,
     install_requires=[
-        "greenlet>=0.4",
+        "websockets>=8.1",
+        "greenlet>=1.0.0",
         "pyee>=8.0.1",
         "typing-extensions;python_version<='3.8'",
     ],

@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 import pytest
+from flaky import flaky
 
 from playwright.async_api import Error
 
@@ -33,7 +36,7 @@ async def test_should_work(page, ws_server):
 
 
 async def test_should_emit_close_events(page, ws_server):
-    async with page.expect_event("websocket") as ws_info:
+    async with page.expect_websocket() as ws_info:
         await page.evaluate(
             """port => {
             let cb;
@@ -53,30 +56,32 @@ async def test_should_emit_close_events(page, ws_server):
 
 
 async def test_should_emit_frame_events(page, ws_server):
-    sent = []
-    received = []
+    log = []
+    socke_close_future = asyncio.Future()
 
     def on_web_socket(ws):
-        ws.on("framesent", lambda payload: sent.append(payload))
-        ws.on("framereceived", lambda payload: received.append(payload))
+        log.append("open")
+        ws.on("framesent", lambda payload: log.append(f"sent<{payload}>"))
+        ws.on("framereceived", lambda payload: log.append(f"received<{payload}>"))
+        ws.on(
+            "close", lambda: (log.append("close"), socke_close_future.set_result(None))
+        )
 
     page.on("websocket", on_web_socket)
-    async with page.expect_event("websocket") as ws_info:
+    async with page.expect_event("websocket"):
         await page.evaluate(
             """port => {
             const ws = new WebSocket('ws://localhost:' + port + '/ws');
-            ws.addEventListener('open', () => {
-                ws.send('echo-text');
-            });
+            ws.addEventListener('open', () => ws.send('outgoing'));
+            ws.addEventListener('message', () => ws.close())
         }""",
             ws_server.PORT,
         )
-    ws = await ws_info.value
-    if not ws.is_closed():
-        await ws.wait_for_event("close")
-
-    assert sent == ["echo-text"]
-    assert received == ["incoming", "text"]
+    await socke_close_future
+    assert log[0] == "open"
+    assert log[3] == "close"
+    log.sort()
+    assert log == ["close", "open", "received<incoming>", "sent<outgoing>"]
 
 
 async def test_should_emit_binary_frame_events(page, ws_server):
@@ -109,6 +114,7 @@ async def test_should_emit_binary_frame_events(page, ws_server):
     assert received == ["incoming", b"\x04\x02"]
 
 
+@flaky
 async def test_should_reject_wait_for_event_on_close_and_error(page, ws_server):
     async with page.expect_event("websocket") as ws_info:
         await page.evaluate(
@@ -123,3 +129,22 @@ async def test_should_reject_wait_for_event_on_close_and_error(page, ws_server):
         async with ws.expect_event("framesent"):
             await page.evaluate("window.ws.close()")
     assert exc_info.value.message == "Socket closed"
+
+
+async def test_should_emit_error_event(page, server, browser_name):
+    future = asyncio.Future()
+    page.on(
+        "websocket",
+        lambda websocket: websocket.on(
+            "socketerror", lambda err: future.set_result(err)
+        ),
+    )
+    await page.evaluate(
+        """port => new WebSocket(`ws://localhost:${port}/bogus-ws`)""",
+        server.PORT,
+    )
+    err = await future
+    if browser_name == "firefox":
+        assert err == "CLOSE_ABNORMAL"
+    else:
+        assert ": 404" in err

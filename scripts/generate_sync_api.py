@@ -17,7 +17,7 @@ import inspect
 import re
 import sys
 from types import FunctionType
-from typing import Any, get_type_hints  # type: ignore
+from typing import Any, get_type_hints
 
 from playwright._impl._helper import to_snake_case
 from scripts.documentation_provider import DocumentationProvider
@@ -40,11 +40,12 @@ def generate(t: Any) -> None:
     print("")
     class_name = short_name(t)
     base_class = t.__bases__[0].__name__
-    base_sync_class = (
-        "SyncBase"
-        if base_class == "ChannelOwner" or base_class == "object"
-        else base_class
-    )
+    if class_name in ["Page", "BrowserContext", "Browser"]:
+        base_sync_class = "SyncContextManager"
+    elif base_class in ["ChannelOwner", "object"]:
+        base_sync_class = "SyncBase"
+    else:
+        base_sync_class = base_class
     print(f"class {class_name}({base_sync_class}):")
     print("")
     print(f"    def __init__(self, obj: {class_name}Impl):")
@@ -60,7 +61,7 @@ def generate(t: Any) -> None:
     for [name, value] in t.__dict__.items():
         if name.startswith("_"):
             continue
-        if not name.startswith("_") and str(value).startswith("<property"):
+        if str(value).startswith("<property"):
             value = value.fget
             print("")
             print("    @property")
@@ -113,7 +114,19 @@ def generate(t: Any) -> None:
                     f"""
         return {prefix}{arguments(value, len(prefix))}{suffix}"""
                 )
-
+    if class_name == "Playwright":
+        print(
+            """
+    def __getitem__(self, value: str) -> "BrowserType":
+        if value == "chromium":
+            return self.chromium
+        elif value == "firefox":
+            return self.firefox
+        elif value == "webkit":
+            return self.webkit
+        raise ValueError("Invalid browser "+value)
+            """
+        )
     print("")
     print(f"mapping.register({class_name}Impl, {class_name})")
 
@@ -123,7 +136,7 @@ def main() -> None:
 
     print(header)
     print(
-        "from playwright._impl._sync_base import EventContextManager, SyncBase, mapping"
+        "from playwright._impl._sync_base import EventContextManager, SyncBase, SyncContextManager, mapping"
     )
     print("NoneType = type(None)")
 

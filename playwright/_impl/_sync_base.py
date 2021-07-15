@@ -14,6 +14,7 @@
 
 import asyncio
 import traceback
+from types import TracebackType
 from typing import (
     Any,
     Awaitable,
@@ -22,6 +23,7 @@ from typing import (
     Generic,
     List,
     Optional,
+    Type,
     TypeVar,
     cast,
 )
@@ -34,17 +36,18 @@ mapping = ImplToApiMapping()
 
 
 T = TypeVar("T")
+Self = TypeVar("Self", bound="SyncContextManager")
 
 
 class EventInfo(Generic[T]):
-    def __init__(self, sync_base: "SyncBase", future: asyncio.Future) -> None:
+    def __init__(self, sync_base: "SyncBase", future: "asyncio.Future[T]") -> None:
         self._sync_base = sync_base
         self._value: Optional[T] = None
-        self._exception = None
+        self._exception: Optional[Exception] = None
         self._future = future
         g_self = greenlet.getcurrent()
 
-        def done_callback(task: Any) -> None:
+        def done_callback(task: "asyncio.Future[T]") -> None:
             try:
                 self._value = mapping.from_maybe_impl(self._future.result())
             except Exception as e:
@@ -68,20 +71,25 @@ class EventInfo(Generic[T]):
 
 
 class EventContextManager(Generic[T]):
-    def __init__(self, sync_base: "SyncBase", future: asyncio.Future) -> None:
-        self._event: EventInfo = EventInfo(sync_base, future)
+    def __init__(self, sync_base: "SyncBase", future: "asyncio.Future[T]") -> None:
+        self._event = EventInfo[T](sync_base, future)
 
     def __enter__(self) -> EventInfo[T]:
         return self._event
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: Type[BaseException],
+        exc_val: BaseException,
+        exc_tb: TracebackType,
+    ) -> None:
         self._event.value
 
 
 class SyncBase(ImplWrapper):
     def __init__(self, impl_obj: Any) -> None:
         super().__init__(impl_obj)
-        self._loop: asyncio.BaseEventLoop = impl_obj._loop
+        self._loop: asyncio.AbstractEventLoop = impl_obj._loop
         self._dispatcher_fiber = impl_obj._dispatcher_fiber
 
     def __str__(self) -> str:
@@ -107,17 +115,17 @@ class SyncBase(ImplWrapper):
             return mapping.wrap_handler(handler)
         return handler
 
-    def on(self, event: str, f: Any) -> None:
+    def on(self, event: str, f: Callable[..., None]) -> None:
         """Registers the function ``f`` to the event name ``event``."""
         self._impl_obj.on(event, self._wrap_handler(f))
 
-    def once(self, event: str, f: Any) -> None:
+    def once(self, event: str, f: Callable[..., None]) -> None:
         """The same as ``self.on``, except that the listener is automatically
         removed after being called.
         """
         self._impl_obj.once(event, self._wrap_handler(f))
 
-    def remove_listener(self, event: str, f: Any) -> None:
+    def remove_listener(self, event: str, f: Callable[..., None]) -> None:
         """Removes the function ``f`` from ``event``."""
         self._impl_obj.remove_listener(event, self._wrap_handler(f))
 
@@ -152,3 +160,19 @@ class SyncBase(ImplWrapper):
             raise exceptions[0]
 
         return list(map(lambda action: results[action], actions))
+
+
+class SyncContextManager(SyncBase):
+    def __enter__(self: Self) -> Self:
+        return self
+
+    def __exit__(
+        self: Self,
+        exc_type: Type[BaseException],
+        exc_val: BaseException,
+        traceback: TracebackType,
+    ) -> None:
+        self.close()
+
+    def close(self: Self) -> None:
+        ...

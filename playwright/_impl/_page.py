@@ -29,6 +29,7 @@ from playwright._impl._api_structures import (
     ViewportSize,
 )
 from playwright._impl._api_types import Error
+from playwright._impl._artifact import Artifact
 from playwright._impl._connection import (
     ChannelOwner,
     from_channel,
@@ -45,6 +46,7 @@ from playwright._impl._helper import (
     DocumentLoadState,
     KeyboardModifier,
     MouseButton,
+    ReducedMotion,
     RouteHandler,
     RouteHandlerEntry,
     TimeoutSettings,
@@ -52,6 +54,8 @@ from playwright._impl._helper import (
     URLMatcher,
     URLMatchRequest,
     URLMatchResponse,
+    async_readfile,
+    async_writefile,
     is_safe_close_error,
     locals_to_params,
     make_dirs_for_file,
@@ -76,6 +80,7 @@ else:  # pragma: no cover
 
 if TYPE_CHECKING:  # pragma: no cover
     from playwright._impl._browser_context import BrowserContext
+    from playwright._impl._network import WebSocket
 
 
 class Page(ChannelOwner):
@@ -110,6 +115,7 @@ class Page(ChannelOwner):
         self, parent: ChannelOwner, type: str, guid: str, initializer: Dict
     ) -> None:
         super().__init__(parent, type, guid, initializer)
+        self._browser_context: BrowserContext = parent
         self.accessibility = Accessibility(self._channel)
         self.keyboard = Keyboard(self._channel)
         self.mouse = Mouse(self._channel)
@@ -124,7 +130,9 @@ class Page(ChannelOwner):
         self._bindings: Dict[str, Any] = {}
         self._routes: List[RouteHandlerEntry] = []
         self._owned_context: Optional["BrowserContext"] = None
-        self._timeout_settings: TimeoutSettings = TimeoutSettings(None)
+        self._timeout_settings: TimeoutSettings = TimeoutSettings(
+            self._browser_context._timeout_settings
+        )
         self._video: Optional[Video] = None
         self._opener = cast("Page", from_nullable_channel(initializer.get("opener")))
 
@@ -170,32 +178,6 @@ class Page(ChannelOwner):
             ),
         )
         self._channel.on(
-            "request",
-            lambda params: self.emit(
-                Page.Events.Request, from_channel(params["request"])
-            ),
-        )
-        self._channel.on(
-            "requestFailed",
-            lambda params: self._on_request_failed(
-                from_channel(params["request"]),
-                params["responseEndTiming"],
-                params["failureText"],
-            ),
-        )
-        self._channel.on(
-            "requestFinished",
-            lambda params: self._on_request_finished(
-                from_channel(params["request"]), params["responseEndTiming"]
-            ),
-        )
-        self._channel.on(
-            "response",
-            lambda params: self.emit(
-                Page.Events.Response, from_channel(params["response"])
-            ),
-        )
-        self._channel.on(
             "route",
             lambda params: self._on_route(
                 from_channel(params["route"]), from_channel(params["request"])
@@ -214,28 +196,6 @@ class Page(ChannelOwner):
 
     def __repr__(self) -> str:
         return f"<Page url={self.url!r}>"
-
-    def _set_browser_context(self, context: "BrowserContext") -> None:
-        self._browser_context = context
-        self._timeout_settings = TimeoutSettings(context._timeout_settings)
-
-    def _on_request_failed(
-        self,
-        request: Request,
-        response_end_timing: float,
-        failure_text: str = None,
-    ) -> None:
-        request._failure_text = failure_text
-        if request._timing:
-            request._timing["responseEnd"] = response_end_timing
-        self.emit(Page.Events.RequestFailed, request)
-
-    def _on_request_finished(
-        self, request: Request, response_end_timing: float
-    ) -> None:
-        if request._timing:
-            request._timing["responseEnd"] = response_end_timing
-        self.emit(Page.Events.RequestFinished, request)
 
     def _on_frame_attached(self, frame: Frame) -> None:
         frame._page = self
@@ -269,7 +229,10 @@ class Page(ChannelOwner):
 
     def _on_close(self) -> None:
         self._is_closed = True
-        self._browser_context._pages.remove(self)
+        if self in self._browser_context._pages:
+            self._browser_context._pages.remove(self)
+        if self in self._browser_context._background_pages:
+            self._browser_context._background_pages.remove(self)
         self.emit(Page.Events.Close)
 
     def _on_crash(self) -> None:
@@ -285,7 +248,9 @@ class Page(ChannelOwner):
     def _on_download(self, params: Any) -> None:
         url = params["url"]
         suggested_filename = params["suggestedFilename"]
-        artifact = from_channel(params["artifact"])
+        artifact = cast(Artifact, from_channel(params["artifact"]))
+        if self._browser_context._browser:
+            artifact._is_remote = self._browser_context._browser._is_remote
         self.emit(
             Page.Events.Download, Download(self, url, suggested_filename, artifact)
         )
@@ -322,7 +287,11 @@ class Page(ChannelOwner):
         return self._main_frame
 
     def frame(self, name: str = None, url: URLMatch = None) -> Optional[Frame]:
-        matcher = URLMatcher(url) if url else None
+        matcher = (
+            URLMatcher(self._browser_context._options.get("baseURL"), url)
+            if url
+            else None
+        )
         for frame in self._frames:
             if name and frame.name == name:
                 return frame
@@ -516,6 +485,7 @@ class Page(ChannelOwner):
         self,
         media: Literal["print", "screen"] = None,
         colorScheme: ColorScheme = None,
+        reducedMotion: ReducedMotion = None,
     ) -> None:
         await self._channel.send("emulateMedia", locals_to_params(locals()))
 
@@ -534,14 +504,18 @@ class Page(ChannelOwner):
         self, script: str = None, path: Union[str, Path] = None
     ) -> None:
         if path:
-            with open(path, "r") as file:
-                script = file.read()
+            script = (await async_readfile(path)).decode()
         if not isinstance(script, str):
             raise Error("Either path or script parameter must be specified")
         await self._channel.send("addInitScript", dict(source=script))
 
     async def route(self, url: URLMatch, handler: RouteHandler) -> None:
-        self._routes.append(RouteHandlerEntry(URLMatcher(url), handler))
+        self._routes.insert(
+            0,
+            RouteHandlerEntry(
+                URLMatcher(self._browser_context._options.get("baseURL"), url), handler
+            ),
+        )
         if len(self._routes) == 1:
             await self._channel.send(
                 "setNetworkInterceptionEnabled", dict(enabled=True)
@@ -578,8 +552,7 @@ class Page(ChannelOwner):
         decoded_binary = base64.b64decode(encoded_binary)
         if path:
             make_dirs_for_file(path)
-            with open(path, "wb") as fd:
-                fd.write(decoded_binary)
+            await async_writefile(path, decoded_binary)
         return decoded_binary
 
     async def title(self) -> str:
@@ -639,7 +612,12 @@ class Page(ChannelOwner):
         return await self._main_frame.tap(**locals_to_params(locals()))
 
     async def fill(
-        self, selector: str, value: str, timeout: float = None, noWaitAfter: bool = None
+        self,
+        selector: str,
+        value: str,
+        timeout: float = None,
+        noWaitAfter: bool = None,
+        force: bool = None,
     ) -> None:
         return await self._main_frame.fill(**locals_to_params(locals()))
 
@@ -680,9 +658,14 @@ class Page(ChannelOwner):
         element: Union["ElementHandle", List["ElementHandle"]] = None,
         timeout: float = None,
         noWaitAfter: bool = None,
+        force: bool = None,
     ) -> List[str]:
         params = locals_to_params(locals())
         return await self._main_frame.select_option(**params)
+
+    async def input_value(self, selector: str, timeout: float = None) -> str:
+        params = locals_to_params(locals())
+        return await self._main_frame.input_value(**params)
 
     async def set_input_files(
         self,
@@ -777,8 +760,7 @@ class Page(ChannelOwner):
         decoded_binary = base64.b64decode(encoded_binary)
         if path:
             make_dirs_for_file(path)
-            with open(path, "wb") as fd:
-                fd.write(decoded_binary)
+            await async_writefile(path, decoded_binary)
         return decoded_binary
 
     @property
@@ -849,7 +831,13 @@ class Page(ChannelOwner):
         url_or_predicate: URLMatchRequest,
         timeout: float = None,
     ) -> EventContextManagerImpl[Request]:
-        matcher = None if callable(url_or_predicate) else URLMatcher(url_or_predicate)
+        matcher = (
+            None
+            if callable(url_or_predicate)
+            else URLMatcher(
+                self._browser_context._options.get("baseURL"), url_or_predicate
+            )
+        )
         predicate = url_or_predicate if callable(url_or_predicate) else None
 
         def my_predicate(request: Request) -> bool:
@@ -863,12 +851,27 @@ class Page(ChannelOwner):
             Page.Events.Request, predicate=my_predicate, timeout=timeout
         )
 
+    def expect_request_finished(
+        self,
+        predicate: Callable[["Request"], bool] = None,
+        timeout: float = None,
+    ) -> EventContextManagerImpl[Request]:
+        return self.expect_event(
+            Page.Events.RequestFinished, predicate=predicate, timeout=timeout
+        )
+
     def expect_response(
         self,
         url_or_predicate: URLMatchResponse,
         timeout: float = None,
     ) -> EventContextManagerImpl[Response]:
-        matcher = None if callable(url_or_predicate) else URLMatcher(url_or_predicate)
+        matcher = (
+            None
+            if callable(url_or_predicate)
+            else URLMatcher(
+                self._browser_context._options.get("baseURL"), url_or_predicate
+            )
+        )
         predicate = url_or_predicate if callable(url_or_predicate) else None
 
         def my_predicate(response: Response) -> bool:
@@ -881,6 +884,13 @@ class Page(ChannelOwner):
         return self.expect_event(
             Page.Events.Response, predicate=my_predicate, timeout=timeout
         )
+
+    def expect_websocket(
+        self,
+        predicate: Callable[["WebSocket"], bool] = None,
+        timeout: float = None,
+    ) -> EventContextManagerImpl["WebSocket"]:
+        return self.expect_event("websocket", predicate, timeout)
 
     def expect_worker(
         self,

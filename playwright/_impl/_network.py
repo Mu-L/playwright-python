@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
 from urllib import parse
 
-from playwright._impl._api_structures import ResourceTiming
+from playwright._impl._api_structures import RemoteAddr, ResourceTiming, SecurityDetails
 from playwright._impl._api_types import Error
 from playwright._impl._connection import (
     ChannelOwner,
@@ -249,6 +249,12 @@ class Response(ChannelOwner):
     def headers(self) -> Dict[str, str]:
         return parse_headers(self._initializer["headers"])
 
+    async def server_addr(self) -> Optional[RemoteAddr]:
+        return await self._channel.send("serverAddr")
+
+    async def security_details(self) -> Optional[SecurityDetails]:
+        return await self._channel.send("securityDetails")
+
     async def finished(self) -> Optional[str]:
         return await self._channel.send("finished")
 
@@ -295,7 +301,8 @@ class WebSocket(ChannelOwner):
             lambda params: self._on_frame_received(params["opcode"], params["data"]),
         )
         self._channel.on(
-            "error", lambda params: self.emit(WebSocket.Events.Error, params["error"])
+            "socketError",
+            lambda params: self.emit(WebSocket.Events.Error, params["error"]),
         )
         self._channel.on("close", lambda params: self._on_close())
 
@@ -340,13 +347,13 @@ class WebSocket(ChannelOwner):
     def _on_frame_sent(self, opcode: int, data: str) -> None:
         if opcode == 2:
             self.emit(WebSocket.Events.FrameSent, base64.b64decode(data))
-        else:
+        elif opcode == 1:
             self.emit(WebSocket.Events.FrameSent, data)
 
     def _on_frame_received(self, opcode: int, data: str) -> None:
         if opcode == 2:
             self.emit(WebSocket.Events.FrameReceived, base64.b64decode(data))
-        else:
+        elif opcode == 1:
             self.emit(WebSocket.Events.FrameReceived, data)
 
     def is_closed(self) -> bool:
